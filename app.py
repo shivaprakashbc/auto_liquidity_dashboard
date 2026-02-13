@@ -1,14 +1,13 @@
 import streamlit as st
 import pandas as pd
 import requests
-import time
 from datetime import datetime, timezone
 
 # =====================================
-# PASSWORD PROTECTION
+# PASSWORD PROTECTION (FREE METHOD)
 # =====================================
 
-APP_PASSWORD = "YourStrongPassword123"
+APP_PASSWORD = "ChangeThisPassword123"   # <-- CHANGE THIS
 
 def check_password():
     def password_entered():
@@ -33,14 +32,19 @@ if not check_password():
     st.stop()
 
 # =====================================
-# APP CONFIG
+# PAGE CONFIG
 # =====================================
 
 st.set_page_config(layout="wide")
-st.title("🚀 Liquidity Sweep + Wick + Volume Dashboard")
+st.title("🚀 Binance Futures Liquidity Sweep Dashboard")
+
+# =====================================
+# SETTINGS
+# =====================================
 
 TIMEFRAME = st.selectbox("Select Timeframe", ["1h", "4h", "1d"])
-RR_MULTIPLIER = 2.0
+RR_MULTIPLIER = st.slider("Risk Reward", 1.0, 5.0, 2.0)
+
 API_URL = "https://fapi.binance.com/fapi/v1/klines"
 
 # =====================================
@@ -54,7 +58,7 @@ if "results" not in st.session_state:
     st.session_state.results = pd.DataFrame()
 
 # =====================================
-# GET SYMBOLS
+# FETCH SYMBOLS
 # =====================================
 
 @st.cache_data(ttl=3600)
@@ -65,7 +69,7 @@ def get_symbols():
 symbols = get_symbols()
 
 # =====================================
-# TIME CHECK
+# TIME CHECK (AUTO SCAN)
 # =====================================
 
 def is_new_candle_close():
@@ -80,8 +84,10 @@ def is_new_candle_close():
     if TIMEFRAME == "1d":
         return now.hour == 0 and now.minute == 0 and now.second < 20
 
+    return False
+
 # =====================================
-# FETCH LAST 3 CLOSED
+# FETCH LAST 3 CLOSED CANDLES
 # =====================================
 
 def get_last_3(symbol):
@@ -94,6 +100,8 @@ def get_last_3(symbol):
     ])
 
     df = df.astype(float)
+
+    # Ignore currently forming candle
     return df.iloc[-4:-1]
 
 # =====================================
@@ -111,7 +119,7 @@ def long_lower(c):
     return wick > body * 1.5
 
 # =====================================
-# SCANNER
+# SCANNER LOGIC
 # =====================================
 
 def run_scan():
@@ -122,7 +130,9 @@ def run_scan():
             df = get_last_3(symbol)
             c1, c2, c3 = df.iloc[0], df.iloc[1], df.iloc[2]
 
-            # BULLISH
+            # -------------------
+            # BULLISH SETUP
+            # -------------------
             if (
                 c1["close"] > c1["open"] and
                 c2["high"] > c1["high"] and
@@ -140,7 +150,9 @@ def run_scan():
 
                 found.append([symbol, "Bullish", entry, sl, tp, round(rr,2)])
 
-            # BEARISH
+            # -------------------
+            # BEARISH SETUP
+            # -------------------
             if (
                 c1["close"] < c1["open"] and
                 c2["low"] < c1["low"] and
@@ -161,33 +173,43 @@ def run_scan():
         except:
             pass
 
-    return pd.DataFrame(found,
-                        columns=["Symbol","Type","Entry","SL","TP","RR"])
+    return pd.DataFrame(
+        found,
+        columns=["Symbol","Type","Entry","SL","TP","RR"]
+    )
 
 # =====================================
-# AUTO LOOP (FREE SAFE VERSION)
+# UI SECTION
 # =====================================
 
-placeholder = st.empty()
+st.divider()
+st.subheader("Scanner Control")
 
-scan_now = st.button("🔍 Scan Now (Manual)")
+scan_now = st.button("🔍 Scan Now")
 
-# Manual Scan
+# Manual scan
 if scan_now:
-    st.session_state.results = run_scan()
-    st.session_state.last_scan_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+    with st.spinner("Scanning Binance Futures..."):
+        st.session_state.results = run_scan()
+        st.session_state.last_scan_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
 
-# Auto Scan at Candle Close
+# Auto scan at candle close
 if is_new_candle_close():
     current_key = datetime.utcnow().strftime("%Y-%m-%d %H")
     if st.session_state.last_scan_time != current_key:
         st.session_state.results = run_scan()
         st.session_state.last_scan_time = current_key
 
-# Display Results
+# =====================================
+# DISPLAY RESULTS
+# =====================================
+
+st.divider()
+st.subheader("Scan Results")
+
 if st.session_state.results.empty:
-    st.info("No signals yet. Waiting for next candle close or click Scan Now.")
+    st.info("No signals yet. Click 'Scan Now' or wait for next candle close.")
 else:
-    placeholder.dataframe(st.session_state.results)
+    st.dataframe(st.session_state.results, use_container_width=True)
 
 st.caption(f"Last Scan (UTC): {st.session_state.last_scan_time}")
