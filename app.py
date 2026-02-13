@@ -1,92 +1,89 @@
 import streamlit as st
-import requests
 import pandas as pd
 from datetime import datetime
+from binance.client import Client
+from binance.exceptions import BinanceAPIException
+import time
 
-# ====================================
+# =====================================
 # CONFIG
-# ====================================
+# =====================================
 st.set_page_config(page_title="Liquidity Sweep Dashboard", layout="wide")
-APP_PASSWORD = "trade123"   # Change this
+APP_PASSWORD = "trade123"  # change this
 
-# ====================================
-# PASSWORD PROTECTION
-# ====================================
+# =====================================
+# PASSWORD
+# =====================================
 def check_password():
-    if "authenticated" not in st.session_state:
-        st.session_state.authenticated = False
+    if "auth" not in st.session_state:
+        st.session_state.auth = False
 
-    if not st.session_state.authenticated:
-        password = st.text_input("Enter Password", type="password")
+    if not st.session_state.auth:
+        pwd = st.text_input("Enter Password", type="password")
         if st.button("Login"):
-            if password == APP_PASSWORD:
-                st.session_state.authenticated = True
+            if pwd == APP_PASSWORD:
+                st.session_state.auth = True
                 st.rerun()
             else:
-                st.error("Wrong Password")
+                st.error("Wrong password")
         st.stop()
 
 check_password()
 
-# ====================================
+# =====================================
 # TITLE
-# ====================================
+# =====================================
 st.title("🚀 Binance Futures Liquidity Sweep Dashboard")
-st.caption("Manual Scan Version (Stable Build)")
-
 timeframe = st.selectbox("Select Timeframe", ["1h", "4h", "1d"])
 
-# ====================================
-# SESSION STATE
-# ====================================
+# =====================================
+# INIT SESSION
+# =====================================
 if "results" not in st.session_state:
     st.session_state.results = pd.DataFrame()
 
-if "last_scan_time" not in st.session_state:
-    st.session_state.last_scan_time = None
+if "last_scan" not in st.session_state:
+    st.session_state.last_scan = None
 
-# ====================================
+# =====================================
+# BINANCE CLIENT (No API Key Needed)
+# =====================================
+client = Client()
+
+# =====================================
 # GET FUTURES SYMBOLS
-# ====================================
+# =====================================
 @st.cache_data(ttl=3600)
 def get_symbols():
-    url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
     try:
-        r = requests.get(url, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-
-        if "symbols" not in data:
-            return []
-
-        return [
+        info = client.futures_exchange_info()
+        symbols = [
             s["symbol"]
-            for s in data["symbols"]
-            if s.get("contractType") == "PERPETUAL"
-            and s.get("status") == "TRADING"
+            for s in info["symbols"]
+            if s["contractType"] == "PERPETUAL"
+            and s["quoteAsset"] == "USDT"
+            and s["status"] == "TRADING"
         ]
-    except:
+        return symbols
+    except Exception as e:
+        st.error(f"Binance connection failed: {e}")
         return []
 
 symbols = get_symbols()
-
 st.write("Total symbols loaded:", len(symbols))
 
-# ====================================
+# =====================================
 # GET KLINES
-# ====================================
+# =====================================
 def get_klines(symbol):
-    url = "https://fapi.binance.com/fapi/v1/klines"
-    params = {"symbol": symbol, "interval": timeframe, "limit": 4}
     try:
-        r = requests.get(url, params=params, timeout=10)
-        r.raise_for_status()
-        data = r.json()
+        klines = client.futures_klines(
+            symbol=symbol,
+            interval=timeframe,
+            limit=4
+        )
 
-        if not isinstance(data, list):
-            return None
-
-        df = pd.DataFrame(data, columns=[
+        df = pd.DataFrame(klines, columns=[
             "open_time","open","high","low","close","volume",
             "close_time","qav","trades","taker_base","taker_quote","ignore"
         ])
@@ -100,12 +97,15 @@ def get_klines(symbol):
         })
 
         return df
+
+    except BinanceAPIException:
+        return None
     except:
         return None
 
-# ====================================
-# DETECT SWEEP LOGIC
-# ====================================
+# =====================================
+# SWEEP LOGIC
+# =====================================
 def detect_sweep(df):
     c1 = df.iloc[-3]
     c2 = df.iloc[-2]
@@ -115,7 +115,7 @@ def detect_sweep(df):
     if c2["volume"] < c1["volume"] * 1.2:
         return None
 
-    # ===== Bullish =====
+    # Bullish
     if (
         c2["low"] < c1["low"] and
         c2["close"] > c1["low"] and
@@ -129,12 +129,12 @@ def detect_sweep(df):
         return {
             "Type": "Bullish",
             "Entry": entry,
-            "StopLoss": sl,
-            "Target(2R)": tp,
+            "SL": sl,
+            "TP(2R)": tp,
             "RR": rr
         }
 
-    # ===== Bearish =====
+    # Bearish
     if (
         c2["high"] > c1["high"] and
         c2["close"] < c1["high"] and
@@ -148,22 +148,22 @@ def detect_sweep(df):
         return {
             "Type": "Bearish",
             "Entry": entry,
-            "StopLoss": sl,
-            "Target(2R)": tp,
+            "SL": sl,
+            "TP(2R)": tp,
             "RR": rr
         }
 
     return None
 
-# ====================================
-# RUN LIVE SCAN
-# ====================================
+# =====================================
+# SCAN FUNCTION
+# =====================================
 def run_scan():
 
     results = []
     progress = st.progress(0)
     status = st.empty()
-    table_live = st.empty()
+    live_table = st.empty()
 
     total = len(symbols)
 
@@ -172,50 +172,50 @@ def run_scan():
         status.write(f"Scanning: {symbol}")
 
         df = get_klines(symbol)
-
         if df is not None and len(df) >= 3:
+
             signal = detect_sweep(df)
             if signal:
                 signal["Symbol"] = symbol
                 results.append(signal)
 
-                # Live update table
-                table_live.dataframe(pd.DataFrame(results), use_container_width=True)
+                live_table.dataframe(pd.DataFrame(results),
+                                     use_container_width=True)
 
         progress.progress((i + 1) / total)
+        time.sleep(0.05)
 
     progress.empty()
     status.empty()
 
     return pd.DataFrame(results)
 
-# ====================================
+# =====================================
 # SCANNER CONTROL
-# ====================================
+# =====================================
 st.divider()
 st.subheader("Scanner Control")
 
 if st.button("🔍 Scan Now"):
 
     if len(symbols) == 0:
-        st.error("No symbols loaded. Binance API might be blocked.")
+        st.error("Binance API blocked in this environment.")
     else:
-        with st.spinner("Scanning entire market..."):
-            results = run_scan()
-            st.session_state.results = results
-            st.session_state.last_scan_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        with st.spinner("Scanning market..."):
+            st.session_state.results = run_scan()
+            st.session_state.last_scan = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 
-        st.success("Scan Completed!")
+        st.success("Scan Completed")
 
-# ====================================
-# FINAL RESULTS DISPLAY
-# ====================================
+# =====================================
+# RESULTS DISPLAY
+# =====================================
 st.divider()
-st.subheader("Final Scan Results")
+st.subheader("Final Results")
 
 if st.session_state.results.empty:
-    st.info("No signals found yet.")
+    st.info("No signals found.")
 else:
     st.dataframe(st.session_state.results, use_container_width=True)
 
-st.caption(f"Last Scan Time: {st.session_state.last_scan_time}")
+st.caption(f"Last Scan: {st.session_state.last_scan}")
