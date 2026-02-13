@@ -2,18 +2,18 @@ import streamlit as st
 import requests
 import pandas as pd
 from datetime import datetime
+from streamlit_autorefresh import st_autorefresh
 import time
 
-# =========================
+# =====================================
 # CONFIG
-# =========================
+# =====================================
 st.set_page_config(page_title="Liquidity Sweep Dashboard", layout="wide")
+APP_PASSWORD = "trade123"   # CHANGE THIS
 
-APP_PASSWORD = "trade123"   # Change this
-
-# =========================
-# PASSWORD PROTECTION
-# =========================
+# =====================================
+# PASSWORD
+# =====================================
 def check_password():
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
@@ -30,29 +30,26 @@ def check_password():
 
 check_password()
 
-# =========================
+# =====================================
 # TITLE
-# =========================
+# =====================================
 st.title("🚀 Binance Futures Liquidity Sweep Dashboard")
-st.caption("Auto scan at candle close | 1H / 4H / 1D | Volume + Long Wick")
+st.caption("Live Scan | Auto Candle Close Scan | Volume Confirmed")
 
-# =========================
-# SETTINGS
-# =========================
 timeframe = st.selectbox("Select Timeframe", ["1h", "4h", "1d"])
 
-# =========================
-# INIT SESSION STATE
-# =========================
+# =====================================
+# SESSION STATE
+# =====================================
 if "results" not in st.session_state:
     st.session_state.results = pd.DataFrame()
 
 if "last_scan_time" not in st.session_state:
     st.session_state.last_scan_time = None
 
-# =========================
-# GET FUTURES SYMBOLS
-# =========================
+# =====================================
+# GET SYMBOLS
+# =====================================
 @st.cache_data(ttl=3600)
 def get_symbols():
     url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
@@ -75,12 +72,12 @@ def get_symbols():
 
 symbols = get_symbols()
 
-# =========================
+# =====================================
 # GET KLINES
-# =========================
-def get_klines(symbol, interval):
+# =====================================
+def get_klines(symbol):
     url = "https://fapi.binance.com/fapi/v1/klines"
-    params = {"symbol": symbol, "interval": interval, "limit": 4}
+    params = {"symbol": symbol, "interval": timeframe, "limit": 4}
     try:
         r = requests.get(url, params=params, timeout=10)
         r.raise_for_status()
@@ -106,21 +103,19 @@ def get_klines(symbol, interval):
     except:
         return None
 
-# =========================
-# LIQUIDITY SWEEP LOGIC
-# =========================
+# =====================================
+# DETECT SWEEP
+# =====================================
 def detect_sweep(df):
     c1 = df.iloc[-3]
     c2 = df.iloc[-2]
     c3 = df.iloc[-1]
 
-    results = []
-
-    # Volume condition
+    # Volume filter
     if c2["volume"] < c1["volume"] * 1.2:
         return None
 
-    # ===== Bullish Sweep =====
+    # ===== Bullish =====
     if (
         c2["low"] < c1["low"] and
         c2["close"] > c1["low"] and
@@ -131,15 +126,9 @@ def detect_sweep(df):
         tp = entry + (entry - sl) * 2
         rr = round((tp - entry) / (entry - sl), 2)
 
-        return {
-            "Type": "Bullish",
-            "Entry": entry,
-            "StopLoss": sl,
-            "Target(2R)": tp,
-            "RR": rr
-        }
+        return "Bullish", entry, sl, tp, rr
 
-    # ===== Bearish Sweep =====
+    # ===== Bearish =====
     if (
         c2["high"] > c1["high"] and
         c2["close"] < c1["high"] and
@@ -150,85 +139,92 @@ def detect_sweep(df):
         tp = entry - (sl - entry) * 2
         rr = round((entry - tp) / (sl - entry), 2)
 
-        return {
-            "Type": "Bearish",
-            "Entry": entry,
-            "StopLoss": sl,
-            "Target(2R)": tp,
-            "RR": rr
-        }
+        return "Bearish", entry, sl, tp, rr
 
     return None
 
-# =========================
-# RUN SCAN
-# =========================
-def run_scan():
+# =====================================
+# LIVE SCAN FUNCTION
+# =====================================
+def run_scan_live():
+
     results = []
+    progress = st.progress(0)
+    status_text = st.empty()
+    table_placeholder = st.empty()
 
-    for symbol in symbols:
-        df = get_klines(symbol, timeframe)
-        if df is None or len(df) < 3:
-            continue
+    total = len(symbols)
 
-        signal = detect_sweep(df)
-        if signal:
-            signal["Symbol"] = symbol
-            results.append(signal)
+    for i, symbol in enumerate(symbols):
+        status_text.write(f"Scanning: {symbol}")
 
-    if results:
-        return pd.DataFrame(results)
-    else:
-        return pd.DataFrame()
+        df = get_klines(symbol)
+        if df is not None and len(df) >= 3:
+            signal = detect_sweep(df)
+            if signal:
+                signal_type, entry, sl, tp, rr = signal
+                results.append({
+                    "Symbol": symbol,
+                    "Type": signal_type,
+                    "Entry": entry,
+                    "StopLoss": sl,
+                    "Target(2R)": tp,
+                    "RR": rr
+                })
 
-# =========================
-# CHECK NEW CANDLE CLOSE
-# =========================
-def is_new_candle():
-    now = datetime.utcnow()
+                table_placeholder.dataframe(pd.DataFrame(results), use_container_width=True)
 
-    if timeframe == "1h":
-        return now.minute == 0 and now.second < 10
-    if timeframe == "4h":
-        return now.hour % 4 == 0 and now.minute == 0 and now.second < 10
-    if timeframe == "1d":
-        return now.hour == 0 and now.minute == 0 and now.second < 10
+        progress.progress((i + 1) / total)
 
-    return False
+    progress.empty()
+    status_text.empty()
 
-# =========================
-# AUTO REFRESH
-# =========================
-time.sleep(1)
+    return pd.DataFrame(results)
 
-# =========================
+# =====================================
+# AUTO REFRESH (60 sec)
+# =====================================
+st_autorefresh(interval=60000, key="auto_refresh")
+
+# =====================================
 # SCANNER CONTROL
-# =========================
+# =====================================
 st.divider()
 st.subheader("Scanner Control")
 
 scan_now = st.button("🔍 Scan Now")
 
-if scan_now:
-    with st.spinner("Scanning Binance Futures..."):
-        st.session_state.results = run_scan()
+def perform_scan():
+    with st.spinner("Scanning entire market..."):
+        st.session_state.results = run_scan_live()
         st.session_state.last_scan_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 
-# Auto scan at candle close
-if is_new_candle():
-    current_key = datetime.utcnow().strftime("%Y-%m-%d %H")
-    if st.session_state.last_scan_time != current_key:
-        st.session_state.results = run_scan()
-        st.session_state.last_scan_time = current_key
+if scan_now:
+    perform_scan()
 
-# =========================
+# ===== AUTO SCAN AT CANDLE CLOSE =====
+now = datetime.utcnow()
+trigger = False
+
+if timeframe == "1h":
+    trigger = now.minute == 0
+elif timeframe == "4h":
+    trigger = now.hour % 4 == 0 and now.minute == 0
+elif timeframe == "1d":
+    trigger = now.hour == 0 and now.minute == 0
+
+if trigger:
+    if st.session_state.last_scan_time != now.strftime("%Y-%m-%d %H"):
+        perform_scan()
+
+# =====================================
 # DISPLAY RESULTS
-# =========================
+# =====================================
 st.divider()
-st.subheader("Scan Results")
+st.subheader("Final Scan Results")
 
 if st.session_state.results.empty:
-    st.info("No signals yet. Waiting for scan...")
+    st.info("No signals found.")
 else:
     st.dataframe(st.session_state.results, use_container_width=True)
 
